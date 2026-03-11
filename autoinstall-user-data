@@ -1,0 +1,502 @@
+#cloud-config
+autoinstall:
+  version: 1
+  packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - python3-venv
+  - git
+  - dnsmasq
+  - syslinux-common
+  apt:
+    disable_suites: [backports]
+    geoip: false
+    preserve_sources_list: false
+    fallback: abort
+    mirror-selection:
+      primary:
+        - uri: "http://127.0.0.1:18080"
+    security:
+    - arches:
+      - amd64
+      - i386
+      uri: "http://127.0.0.1:18080"
+  early-commands:
+    - mkdir -p /mnt/usbdata
+    - mount /dev/disk/by-label/THAKI_DATA /mnt/usbdata
+    - printf 'deb [trusted=yes] file:/mnt/usbdata noble main restricted universe multiverse \n' >> /etc/apt/sources.list.d/thaki-usb.list
+    - printf 'deb [trusted=yes] file:/mnt/usbdata noble-updates main restricted universe multiverse \n' >> /etc/apt/sources.list.d/thaki-usb.list
+    - printf 'deb [trusted=yes] file:/mnt/usbdata noble-security main restricted universe multiverse \n' >> /etc/apt/sources.list.d/thaki-usb.list
+    - python3 -m http.server 18080 --directory /mnt/usbdata >/var/log/usb-http.log 2>&1 &
+    - apt-get update || true
+  codecs:
+    install: false
+  drivers:
+    install: false
+  identity:
+    hostname: bootstrap-test1
+    password: $6$eK.4LYZTBYtv3RR7$pAF7P1rW/428j1INukuMM4EnnUbyMQaJ6cOOeU1wwLwdU.QwBYGJwZ6/nCEj/rC.HyCSVmaW7DgoU4znldOmE1
+    realname: tkadmin
+    username: tkadmin
+  kernel:
+    package: linux-generic
+  keyboard:
+    layout: us
+    toggle: null
+    variant: ''
+  locale: en_US.UTF-8
+  timezone: "Asia/Seoul"
+  oem:
+    install: auto
+  source:
+    id: ubuntu-server
+    search_drivers: false
+  ssh:
+    allow-pw: true
+    authorized-keys: []
+    install-server: true
+  storage:
+    swap:
+      size: 0
+    layout:
+      name: lvm
+      sizing-policy: all
+    match:
+      path: /dev/nvme0n1
+  updates: security
+    # 여기부터는 설치된 OS가 "첫 부팅"할 때 cloud-init이 처리하는 부분
+  network:
+    version: 2
+    renderer: networkd
+    ethernets:
+      mgmt:
+        match:
+          name: enp0s31f6
+        set-name: mgmt1
+        addresses:
+          - 192.168.0.205/24
+        routes:
+          - to: default
+            via: 192.168.0.1
+        nameservers:
+          addresses:
+            - 4.2.2.1
+            - 8.8.8.8
+  user-data:
+    write_files:
+      - path: /usr/local/bin/cp.env
+        permissions: '0644'
+        owner: root:root
+        content: |
+          THAKI_PXENIC="mgmt1"
+          THAKI_DATA="/mnt/usbdata"
+          THAKI_ADMIN="tkadmin"
+          THAKI_SRC_DATA_LABEL="THAKI_DATA"
+          THAKI_DST_DATA_LABEL="TKDATA"
+          THAKI_DST_DISK=""
+          HARBOR_URL="ar.thakicloud.net"
+          HARBOR_PORT=38088
+          HARBOR_USER=admin
+          HARBOR_PWD=Harbor12345
+          HARBOR_PROXIES="docker.io ghcr.io quay.io registry.k8s.io"
+          HARBOR_PKG="${THAKI_DATA}/init-pkg/harbor-offline-installer-thaki-v2.14.0.tgz"
+          THAKI_DOCKER_PKG=${THAKI_DATA}/init-pkg/docker-compose-pack-28.5.1-1.tgz
+          HARBOR_IP="192.168.0.205"
+          HARBOR_PROJECT_SCRIPT="${THAKI_DATA}/init-pkg/create_harbor_projects.sh"
+          THAKI_PXE_PKG="${THAKI_DATA}/pxe-netboot/pxe-netboot.tgz"
+      - path: /usr/local/lib/cp/lib.sh
+        permissions: '0644'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+  
+          log()  { echo "[cp] $*"; }
+          warn() { echo "[cp][WARN] $*" >&2; }
+          die()  { echo "[cp][ERROR] $*" >&2; exit 1; }
+  
+          require_vars() {
+            local v
+            for v in "$@"; do
+              if [[ -z "${!v:-}" ]]; then
+                die "Required variable '${v}' is not set"
+              fi
+            done
+          }
+          run_stage() {
+            local stage="$1"
+            log "==> RUN: ${stage}"
+            bash "${stage}"
+            log "<== OK : ${stage}"
+          }
+      - path: /usr/local/sbin/init-cp.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+  
+          ENV_FILE="/usr/local/bin/cp.env"
+          LIB="/usr/local/lib/cp/lib.sh"
+          STAGES_DIR="/usr/local/lib/cp/stages"
+          STATE_DIR="/var/lib/cp"
+          LOG_FILE="/var/log/init-cp.log"
+  
+          mkdir -p "${STATE_DIR}" "$(dirname "${LOG_FILE}")"
+  
+          # log to file + console
+          exec > >(tee -a "${LOG_FILE}") 2>&1
+  
+          if [[ ! -f "${LIB}" ]]; then
+            echo "[cp][ERROR] missing ${LIB}" >&2
+            exit 1
+          fi
+          # shellcheck disable=SC1090
+          . "${LIB}"
+          export -f log warn die
+  
+          if [[ ! -f "${ENV_FILE}" ]]; then
+            die "missing ${ENV_FILE}"
+          fi
+  
+          # load cp.env ONCE, export everything so child scripts inherit env
+          set -a
+          # shellcheck disable=SC1090
+          . "${ENV_FILE}"
+          set +a
+  
+          # baseline validation
+          require_vars THAKI_DATA THAKI_SRC_DATA_LABEL HARBOR_URL HARBOR_PORT HARBOR_PROXIES
+  
+          log "Starting init-cp"
+          log "ENV loaded from ${ENV_FILE}"
+          log "Stages: ${STAGES_DIR}"
+  
+          if [[ ! -d "${STAGES_DIR}" ]]; then
+            die "missing stages dir ${STAGES_DIR}"
+          fi
+  
+          # Run stages in lexical order: 00-*, 10-*, ...
+          shopt -s nullglob
+          local_stages=( "${STAGES_DIR}"/*.sh )
+          shopt -u nullglob
+  
+          if (( ${#local_stages[@]} == 0 )); then
+            warn "No stages found in ${STAGES_DIR}"
+            exit 0
+          fi
+  
+          for stage in "${local_stages[@]}"; do
+            stamp="${STATE_DIR}/$(basename "${stage}").done"
+            if [[ -f "${stamp}" ]]; then
+              log "SKIP (done): ${stage}"
+              continue
+            fi
+            run_stage "${stage}"
+            date -Is > "${stamp}"
+          done
+  
+          log "All stages done."
+  
+      # ----- Stages -----
+  
+      - path: /usr/local/lib/cp/stages/10-usbdata-mount.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          # cp.env is already exported by init-cp.sh (or by systemd EnvironmentFile)
+  
+          mkdir -p "${THAKI_DATA}"
+  
+          DEV="/dev/disk/by-label/${THAKI_SRC_DATA_LABEL}"
+          if [[ ! -e "${DEV}" ]]; then
+            echo "[cp][ERROR] Device ${DEV} not found..." >&2
+            exit 1
+          fi
+    
+          mount -o ro "${DEV}" "${THAKI_DATA}"
+          # mount check
+            if mountpoint -q "${THAKI_DATA}"; then
+            grep -q "${THAKI_SRC_DATA_LABEL}" /etc/fstab || \
+            echo "LABEL=${THAKI_SRC_DATA_LABEL}  ${THAKI_DATA}  auto  ro,nofail,x-systemd.automount  0  0" >> /etc/fstab
+            systemctl daemon-reload
+            systemctl restart local-fs.target || true
+          fi
+
+      - path: /usr/local/lib/cp/stages/11-prepare-data.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          # variables :
+          # - THAKI_DATA=/mnt/usbdata  (USB mount)
+          # - THAKI_DST_DISK optional (ex: /dev/sdb or /dev/disk/by-id/...)
+          #
+          # result:
+          # - /data mount
+          # - rsync USB -> /data/thaki-pkg in background
+            
+          DATA_MNT="/data"
+          DEST="${DATA_MNT}/thaki-pkg"
+          SRC="${THAKI_DATA:-/mnt/usbdata}"
+      
+          RSYNC_LOG="/var/log/cp-rsync-usbdata-to-data.log"
+          RSYNC_PID="/run/cp-rsync.pid"
+      
+          mkdir -p "${DATA_MNT}" "${DEST}" /run
+      
+          # ---- If THAKI_DST_DISK is not empty: check whether the disk is -> format ext4 -> mount to /data ----
+          if [[ -n "${THAKI_DST_DISK:-}" ]]; then
+            DISK="${THAKI_DST_DISK}"
+      
+            # check whether DISK exists and is a block device
+            if [[ ! -b "${DISK}" ]]; then
+              die "THAKI_DST_DISK='${DISK}' is not a block device"
+            fi
+      
+            # check whether DISK is the root disk (to avoid formatting root disk by mistake)
+            ROOT_SRC="$(findmnt -n -o SOURCE / || true)"
+            # ROOT_SRC can be empty in some edge cases (e.g., containerized env), so skip check in that case
+            ROOT_PK="$(lsblk -no PKNAME "${ROOT_SRC}" 2>/dev/null || true)"
+            DISK_PK="$(lsblk -no PKNAME "${DISK}" 2>/dev/null || true)"
+      
+            if [[ -n "${ROOT_PK}" && -n "${DISK_PK}" && "${ROOT_PK}" == "${DISK_PK}" ]]; then
+              die "Refusing to format disk '${DISK}' (appears to be the root disk)"
+            fi
+      
+            # Check if DATA_MNT is already mounted
+            if mountpoint -q "${DATA_MNT}"; then
+              log "${DATA_MNT} already mounted; skip format/mount."
+            else
+              # Check if DISK is already mounted somewhere else
+              if findmnt -n -S "${DISK}" >/dev/null 2>&1; then
+                die "Disk ${DISK} is already mounted somewhere; refusing to format"
+              fi
+      
+              # Format DISK as ext4 and mount to DATA_MNT
+              log "Formatting ${DISK} as ext4..."
+              mkfs.ext4 -F "${DISK}"
+      
+              log "Mounting ${DISK} to ${DATA_MNT}..."
+              mount -t ext4 "${DISK}" "${DATA_MNT}"
+      
+              # Add to fstab for automatic mounting
+              UUID="$(blkid -s UUID -o value "${DISK}")"
+              if [[ -n "${UUID}" ]]; then
+                grep -q "UUID=${UUID}[[:space:]]\+${DATA_MNT}" /etc/fstab || \
+                  echo "UUID=${UUID}  ${DATA_MNT}  ext4  defaults,nofail  0  2" >> /etc/fstab
+              else
+                warn "Could not read UUID for ${DISK}; fstab entry not added."
+              fi
+            fi
+            # ---- (3) USB(/mnt/usbdata) -> /data/thaki-pkg rsync in background ----
+            # Check whether SRC is mounted
+            if ! mountpoint -q "${SRC}"; then
+              die "USB source '${SRC}' is not mounted; expected after 10-usbdata-mount.sh"
+            fi
+        
+            # Check rsync availability
+            command -v rsync >/dev/null 2>&1 || die "rsync not found. Install rsync before running this stage."
+  
+            log "Starting background rsync: ${SRC}/ -> ${DEST}/"
+            nohup rsync -aHAX --info=progress2 "${SRC}/" "${DEST}/" >"${RSYNC_LOG}" 2>&1 &
+            echo $! > "${RSYNC_PID}"
+        
+            log "rsync started in background (pid=$(cat "${RSYNC_PID}")). Log: ${RSYNC_LOG}"
+            log "Proceeding to next stages without waiting."
+          else
+            log "THAKI_DST_DISK is empty;; Skipping /data mount and rsync..."
+          fi
+      
+      - path: /usr/local/lib/cp/stages/12-apt-usb-sources.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          # Ensure sources file exists
+          cat > /etc/apt/sources.list.d/thaki-usb.sources <<EOF
+          Types: deb
+          URIs: file:${THAKI_DATA}
+          Suites: noble noble-updates noble-security
+          Components: main restricted universe multiverse
+          Trusted: yes
+          EOF
+  
+          # ubuntu.sources 제거는 정책에 따라(기존과 동일)
+          rm -f /etc/apt/sources.list.d/ubuntu.sources
+  
+          # update는 실패 허용(USB 없을 수 있음)
+          apt-get update || true
+
+      - path: /usr/local/lib/cp/stages/14-install-docker-pkgs.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          tempdir=$(mktemp -d)
+          tar xvfz ${THAKI_DOCKER_PKG} -C $tempdir
+          dpkg -i $tempdir/*.deb
+
+          rm -rf $tempdir
+          usermod -aG docker ${THAKI_ADMIN}
+
+          cat > /etc/docker/daemon.json <<EOF
+          {
+            "insecure-registries": ["${HARBOR_URL}:${HARBOR_PORT}"]
+          }
+          EOF
+          systemctl restart docker || true
+
+      - path: /usr/local/lib/cp/stages/16-config-pxetftp.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          tar xvfz ${THAKI_PXE_PKG} -C /
+          cat >/etc/dnsmasq.d/pxe.conf <<EOF
+          interface=${THAKI_PXENIC},lo
+          bind-interfaces
+          dhcp-range=${THAKI_PXENIC},192.168.0.100,192.168.0.200
+          dhcp-boot=pxelinux.0
+          dhcp-match=set:efi-x86_64,option:client-arch,7
+          dhcp-boot=tag:efi-x86_64,bootx64.efi
+          enable-tftp
+          tftp-root=/srv/tftp
+          dhcp-authoritative
+          dhcp-option=1,255.255.255.0
+          dhcp-broadcast
+          EOF
+
+          systemctl enable --now dnsmasq || true
+
+      - path: /usr/local/lib/cp/stages/20-prepare-harbor.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          # check required variables
+          : "${THAKI_ADMIN:?}"
+          : "${HARBOR_PKG:?}"
+          
+          ADMIN_HOME="$(getent passwd "${THAKI_ADMIN}" | cut -d: -f6)"
+          HARBOR_HOME="${ADMIN_HOME}/harbor"
+
+          sed -i '/ar\.thakicloud\.net/d' /etc/hosts
+          echo "${HARBOR_IP} ar.thakicloud.net" >> /etc/hosts
+          
+          sudo -u "${THAKI_ADMIN}" bash -lc "
+            set -euo pipefail
+            rm -rf '${HARBOR_HOME:?}/'*
+            tar xvfz '${HARBOR_PKG}' -C '${ADMIN_HOME}'
+          "
+
+          cp ${HARBOR_HOME}/harbor.yml.thaki "${HARBOR_HOME}/harbor.yml"
+          chown "${THAKI_ADMIN}:${THAKI_ADMIN}" "${HARBOR_HOME}/harbor.yml"
+
+          echo "Ready to deploy Harbor..."
+          cat > "${ADMIN_HOME}/0-install-harbor.sh" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          source /usr/local/bin/cp.env
+          cd ${HARBOR_HOME};sudo ./install.sh
+          EOF
+          
+          cat > "${ADMIN_HOME}/1-craete-harbor-projects.sh" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          source /usr/local/bin/cp.env
+          ${THAKI_DATA}/init-pkg/create_harbor_projects.sh http://${HARBOR_URL}:${HARBOR_PORT} ${HARBOR_USER} ${HARBOR_PWD}
+          EOF
+
+          cat > "${ADMIN_HOME}/2-config-containerd-harbor.sh" <<'__SCRIPT__'
+          #!/usr/bin/env bash
+          set -euo pipefail
+  
+          mkdir -p /etc/containerd
+          containerd config default > /etc/containerd/config.toml
+  
+          # SystemdCgroup 사용
+          sed -i "s/systemd_cgroup = false/systemd_cgroup = true/" /etc/containerd/config.toml
+          sed -i "s/SystemdCgroup = false/SystemdCgroup = true/" /etc/containerd/config.toml
+  
+          # containerd registry config_path
+          sed -i '/\[plugins\."io\.containerd\.grpc\.v1\.cri"\.registry\]/,/^\[/ s|\(config_path = \)""|\1"/etc/containerd/certs.d"|' \
+            /etc/containerd/config.toml
+
+          source /usr/local/bin/cp.env
+  
+          for i in ${HARBOR_PROXIES}; do
+            PRJ="${i//./-}"
+            DIR="/etc/containerd/certs.d/${i}"
+            mkdir -p "${DIR}"
+  
+            if [[ "${i}" == "docker.io" ]]; then
+              SERVER="https://registry-1.${i}"
+            else
+              SERVER="https://${i}"
+            fi
+  
+            cat > "${DIR}/hosts.toml" <<__HOSTS__
+          server = "${SERVER}"
+  
+          [host."http://${HARBOR_URL}:${HARBOR_PORT}/v2/${PRJ}"]
+          capabilities = ["pull", "resolve"]
+          override_path = true
+          __HOSTS__
+          done
+  
+          __SCRIPT__
+          systemctl restart containerd || true
+
+          cat > "${ADMIN_HOME}/3-setup-os-mirror.sh" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          cd ${HARBOR_HOME}
+          sudo cp docker-compose.yml.thaki docker-compose.yml
+          sudo cp nginx.conf.thaki common/config/nginx/nginx.conf
+          docker compose stop proxy
+          docker compose rm -f proxy
+          sudo docker compose up -d proxy
+          echo "OS mirror setup complete..."
+          echo "Test - curl http://ar.thakicloud.net:38088/ubuntu/"
+          EOF
+
+          cat > "${ADMIN_HOME}/4-unzip-container-images.sh" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          mkdir container-images
+          tar xvfz ${THAKI_DATA}/cri-images/docker-io-images.tgz -C container-images
+          tar xvfz ${THAKI_DATA}/cri-images/quay-io-images.tgz -C container-images
+          tar xvfz ${THAKI_DATA}/cri-images/registry-kis-io-images.tgz -C container-images
+          tar xvfz ${THAKI_DATA}/init-pkg/artifact-scripts.tgz -C container-images
+          cd container-images
+          echo "Start puching all images to Harbor..." && sleep 5
+          ./push-all-artifact.sh ${HARBOR_URL}:${HARBOR_PORT} ${HARBOR_USER} ${HARBOR_PWD}
+          EOF
+
+          chown "${THAKI_ADMIN}:${THAKI_ADMIN}" "${ADMIN_HOME}/0-install-harbor.sh"
+          chown "${THAKI_ADMIN}:${THAKI_ADMIN}" "${ADMIN_HOME}/1-craete-harbor-projects.sh"
+          chown "${THAKI_ADMIN}:${THAKI_ADMIN}" "${ADMIN_HOME}/2-config-containerd-harbor.sh"
+          chown "${THAKI_ADMIN}:${THAKI_ADMIN}" "${ADMIN_HOME}/3-setup-os-mirror.sh"
+          chown "${THAKI_ADMIN}:${THAKI_ADMIN}" "${ADMIN_HOME}/4-unzip-container-images.sh"
+          chmod 0755 "${ADMIN_HOME}/0-install-harbor.sh"
+          chmod 0755 "${ADMIN_HOME}/1-craete-harbor-projects.sh"
+          chmod 0755 "${ADMIN_HOME}/2-config-containerd-harbor.sh"
+          chmod 0755 "${ADMIN_HOME}/3-setup-os-mirror.sh"
+          chmod 0755 "${ADMIN_HOME}/4-unzip-container-images.sh"
+
+    runcmd:
+      - [ bash, -lc, "/usr/local/sbin/init-cp.sh" ]
+
