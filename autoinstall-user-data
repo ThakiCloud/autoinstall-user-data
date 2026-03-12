@@ -106,6 +106,7 @@ autoinstall:
           HARBOR_IP="192.168.0.205"
           HARBOR_PROJECT_SCRIPT="${THAKI_DATA}/init-pkg/create_harbor_projects.sh"
           THAKI_PXE_PKG="${THAKI_DATA}/pxe-netboot/pxe-netboot.tgz"
+          KOLLA_PATH="${THAKI_DATA}/init-pkg/kolla-ansible-offline-bundle.tgz"
       - path: /usr/local/lib/cp/lib.sh
         permissions: '0644'
         owner: root:root
@@ -131,6 +132,90 @@ autoinstall:
             bash "${stage}"
             log "<== OK : ${stage}"
           }
+      - path: /usr/local/lib/cp/setup-kolla-ansible.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          : "${THAKI_ADMIN:?}"
+          : "${KOLLA_PATH:?}"
+
+          ADMIN_HOME="$(getent passwd "${THAKI_ADMIN}" | cut -d: -f6 || true)"
+          [[ -n "${ADMIN_HOME}" ]] || die "Failed to resolve home for THAKI_ADMIN='${THAKI_ADMIN}'"
+
+          KOLLA_HOME="${ADMIN_HOME}/kolla-ansible"
+          KOLLA_VENV="${KOLLA_HOME}/.venv"
+          EXTRACT_DIR="${KOLLA_HOME}/bundle"
+          HELPER_SCRIPT="${ADMIN_HOME}/5-use-kolla-ansible.sh"
+
+          [[ -f "${KOLLA_PATH}" ]] || die "KOLLA_PATH does not exist: ${KOLLA_PATH}"
+
+          if [[ ! "${KOLLA_PATH}" =~ \.(tgz|tar\.gz)$ ]]; then
+            die "KOLLA_PATH must point to a .tgz or .tar.gz bundle: ${KOLLA_PATH}"
+          fi
+
+          install -d -m 0755 -o "${THAKI_ADMIN}" -g "${THAKI_ADMIN}" "${KOLLA_HOME}"
+
+          if [[ -x "${KOLLA_VENV}/bin/kolla-ansible" ]]; then
+            if sudo -u "${THAKI_ADMIN}" bash -lc "
+              set -euo pipefail
+              source '${KOLLA_VENV}/bin/activate'
+              kolla-ansible -h >/dev/null
+            "; then
+              log "Kolla-Ansible environment already present at ${KOLLA_VENV}; skipping rebuild."
+            else
+              warn "Existing Kolla-Ansible environment is invalid; rebuilding."
+              rm -rf "${KOLLA_VENV}" "${EXTRACT_DIR}"
+            fi
+          fi
+
+          if [[ ! -x "${KOLLA_VENV}/bin/kolla-ansible" ]]; then
+            install -d -m 0755 -o "${THAKI_ADMIN}" -g "${THAKI_ADMIN}" "${EXTRACT_DIR}"
+            rm -rf "${EXTRACT_DIR:?}"/*
+
+            sudo -u "${THAKI_ADMIN}" tar xvfz "${KOLLA_PATH}" -C "${EXTRACT_DIR}" >/dev/null
+
+            [[ -d "${EXTRACT_DIR}/wheelhouse" ]] || die "wheelhouse directory not found in ${KOLLA_PATH}"
+            [[ -d "${EXTRACT_DIR}/galaxy-collections" ]] || die "galaxy-collections directory not found in ${KOLLA_PATH}"
+            compgen -G "${EXTRACT_DIR}/galaxy-collections/*.tar.gz" >/dev/null || \
+              die "No ansible collection tarballs found in ${EXTRACT_DIR}/galaxy-collections"
+
+            sudo -u "${THAKI_ADMIN}" bash -lc "
+              set -euo pipefail
+              python3 -m venv '${KOLLA_VENV}'
+              source '${KOLLA_VENV}/bin/activate'
+              pip install --no-index --find-links='${EXTRACT_DIR}/wheelhouse' -U pip
+              pip install --no-index --find-links='${EXTRACT_DIR}/wheelhouse' build wheel setuptools
+              pip install --no-index --find-links='${EXTRACT_DIR}/wheelhouse' kolla-ansible
+              pip install --no-index --find-links='${EXTRACT_DIR}/wheelhouse' \
+                python-openstackclient \
+                python-octaviaclient \
+                python-neutronclient \
+                python-keystoneclient \
+                python-ironicclient \
+                osc-placement
+              ansible-galaxy collection install --offline '${EXTRACT_DIR}'/galaxy-collections/*.tar.gz
+              kolla-ansible -h >/dev/null
+            "
+          fi
+
+          cat > "${HELPER_SCRIPT}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          source "${KOLLA_VENV}/bin/activate"
+          cd "${KOLLA_HOME}"
+          if [[ \$# -eq 0 ]]; then
+            echo "Kolla-Ansible environment activated at ${KOLLA_VENV}"
+            echo "Example: kolla-ansible -h"
+            exec bash
+          fi
+          exec "\$@"
+          EOF
+
+          chown "${THAKI_ADMIN}:${THAKI_ADMIN}" "${HELPER_SCRIPT}"
+          chmod 0755 "${HELPER_SCRIPT}"
       - path: /usr/local/sbin/init-cp.sh
         permissions: '0755'
         owner: root:root
@@ -379,6 +464,18 @@ autoinstall:
 
           systemctl enable --now dnsmasq || true
 
+      - path: /usr/local/lib/cp/stages/18-setup-kolla-ansible.sh
+        permissions: '0755'
+        owner: root:root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          : "${THAKI_ADMIN:?}"
+          : "${KOLLA_PATH:?}"
+
+          /usr/local/lib/cp/setup-kolla-ansible.sh
+
       - path: /usr/local/lib/cp/stages/20-prepare-harbor.sh
         permissions: '0755'
         owner: root:root
@@ -499,4 +596,3 @@ autoinstall:
 
     runcmd:
       - [ bash, -lc, "/usr/local/sbin/init-cp.sh" ]
-

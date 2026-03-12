@@ -5,7 +5,7 @@
 - `#cloud-config` 및 `autoinstall` 기반 Ubuntu 설치
 - `THAKI_DATA` 라벨을 가진 USB 볼륨을 이용한 오프라인 APT 부트스트랩
 - `cloud-init user-data` 기반 첫 부팅 후 프로비저닝
-- Docker, PXE/TFTP, Harbor 구성을 위한 단계형 post-install 스크립트
+- Docker, PXE/TFTP, Kolla-Ansible, Harbor 구성을 위한 단계형 post-install 스크립트
 
 설치는 먼저 수행되고, OS가 첫 부팅한 뒤 `/usr/local/sbin/init-cp.sh`가 순서화된 stage 스크립트를 한 번씩 실행하며 완료 상태를 기록한다.
 
@@ -97,12 +97,13 @@
   - autoinstall APT 접근을 위해 로컬 HTTP 서버로 노출
 - 첫 부팅 후:
   - read-only로 다시 마운트
-  - Harbor, Docker, PXE, 이미지 아카이브 소스로 사용
+  - Harbor, Docker, PXE, Kolla-Ansible, 이미지 아카이브 소스로 사용
 
 ### USB에 있어야 하는 예상 콘텐츠
 
 - `${THAKI_DATA}/init-pkg/harbor-offline-installer-thaki-v2.14.0.tgz`
 - `${THAKI_DATA}/init-pkg/docker-compose-pack-28.5.1-1.tgz`
+- `${THAKI_DATA}/init-pkg/kolla-ansible-offline-bundle.tgz`
 - `${THAKI_DATA}/init-pkg/create_harbor_projects.sh`
 - `${THAKI_DATA}/init-pkg/artifact-scripts.tgz`
 - `${THAKI_DATA}/pxe-netboot/pxe-netboot.tgz`
@@ -138,6 +139,7 @@
 | `HARBOR_IP` | `192.168.0.205` | `/etc/hosts`에 강제로 기록할 Harbor IP |
 | `HARBOR_PROJECT_SCRIPT` | `${THAKI_DATA}/init-pkg/create_harbor_projects.sh` | Harbor 프로젝트 생성 스크립트 경로. 현재 stage에서 직접 사용하지 않음 |
 | `THAKI_PXE_PKG` | `${THAKI_DATA}/pxe-netboot/pxe-netboot.tgz` | PXE/TFTP 자산 번들 |
+| `KOLLA_PATH` | `${THAKI_DATA}/init-pkg/kolla-ansible-offline-bundle.tgz` | 오프라인 Kolla-Ansible 번들 경로 |
 
 ### `lib.sh`
 
@@ -159,6 +161,26 @@
 - `/usr/local/lib/cp/stages/*.sh` 목록 수집
 - 파일명 순서대로 stage 실행
 - 완료 상태를 `/var/lib/cp`에 기록
+
+### `setup-kolla-ansible.sh`
+
+`/usr/local/lib/cp/setup-kolla-ansible.sh`는 `THAKI_ADMIN`용 오프라인 `kolla-ansible` 환경을 준비한다.
+
+주요 동작:
+
+- `THAKI_ADMIN`으로 관리자 홈 디렉터리 조회
+- `KOLLA_PATH`가 로컬 `.tgz` 번들을 가리키는지 검증
+- 번들을 `${ADMIN_HOME}/kolla-ansible/bundle` 아래로 해제
+- `${ADMIN_HOME}/kolla-ansible/.venv`에 virtualenv 생성
+- `wheelhouse/`에서 `--no-index` 방식으로 Python 패키지 설치
+- `galaxy-collections/*.tar.gz`에서 ansible collection 오프라인 설치
+- `kolla-ansible -h`로 최종 검증
+- `${ADMIN_HOME}/5-use-kolla-ansible.sh` 실행 보조 스크립트 생성
+
+번들에 필요한 최소 구조:
+
+- `wheelhouse/`
+- `galaxy-collections/`
 
 ## Stage 상세
 
@@ -249,6 +271,19 @@
 - UEFI x86_64 부트 파일: `bootx64.efi`
 - TFTP root: `/srv/tftp`
 - subnet mask 옵션: `255.255.255.0`
+
+### `18-setup-kolla-ansible.sh`
+
+목적:
+
+- 관리자 계정용 오프라인 Kolla-Ansible 환경 준비
+
+동작:
+
+- `THAKI_ADMIN`, `KOLLA_PATH` 필요
+- `/usr/local/lib/cp/setup-kolla-ansible.sh` 호출
+- Docker 설정 이후, Harbor 준비 이전에 실행
+- 기존 stage stamp 메커니즘을 그대로 사용하여 재실행 시 중복 작업 방지
 
 ### `20-prepare-harbor.sh`
 
@@ -341,6 +376,10 @@
   - 인터페이스
   - DHCP 범위
   - TFTP 자산
+- Kolla-Ansible:
+  - 번들 경로
+  - 관리자 홈 기준 설치 위치
+  - 오프라인 번들 내용
 - Harbor:
   - hostname
   - IP
@@ -353,6 +392,7 @@
 ## 알려진 공백 사항
 
 - `THAKI_DST_DATA_LABEL`은 정의되어 있지만 사용되지 않는다.
+- `KOLLA_PATH`는 `wheelhouse/`와 `galaxy-collections/`를 포함한 번들을 가리켜야 한다.
 - `HARBOR_PROJECT_SCRIPT`는 정의되어 있지만 stage 로직에서 직접 사용되지 않는다.
 - `1-craete-harbor-projects.sh` 파일명에는 오타가 있어 보인다.
 - Stage 번호는 향후 삽입을 위해 일부 비워 둔 구조다.

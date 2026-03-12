@@ -5,7 +5,7 @@
 - Ubuntu installation via `#cloud-config` and `autoinstall`
 - offline APT bootstrap from a USB volume labeled `THAKI_DATA`
 - first-boot provisioning through `cloud-init user-data`
-- staged post-install setup for Docker, PXE/TFTP, and Harbor
+- staged post-install setup for Docker, PXE/TFTP, Kolla-Ansible, and Harbor
 
 The install happens first. After the OS boots, `/usr/local/sbin/init-cp.sh` runs ordered stage scripts once and records completion stamps.
 
@@ -113,12 +113,13 @@ The install requires a readable USB volume labeled `THAKI_DATA`.
   - exposed through a local HTTP server for autoinstall APT access
 - during first boot:
   - remounted read-only
-  - used as the source for Harbor, Docker, PXE, and image archives
+  - used as the source for Harbor, Docker, PXE, Kolla-Ansible, and image archives
 
 ### Expected content on the USB media
 
 - `${THAKI_DATA}/init-pkg/harbor-offline-installer-thaki-v2.14.0.tgz`
 - `${THAKI_DATA}/init-pkg/docker-compose-pack-28.5.1-1.tgz`
+- `${THAKI_DATA}/init-pkg/kolla-ansible-offline-bundle.tgz`
 - `${THAKI_DATA}/init-pkg/create_harbor_projects.sh`
 - `${THAKI_DATA}/init-pkg/artifact-scripts.tgz`
 - `${THAKI_DATA}/pxe-netboot/pxe-netboot.tgz`
@@ -154,6 +155,7 @@ The install requires a readable USB volume labeled `THAKI_DATA`.
 | `HARBOR_IP` | `192.168.0.205` | IP forced into `/etc/hosts` for Harbor |
 | `HARBOR_PROJECT_SCRIPT` | `${THAKI_DATA}/init-pkg/create_harbor_projects.sh` | Harbor project helper path; currently not used directly |
 | `THAKI_PXE_PKG` | `${THAKI_DATA}/pxe-netboot/pxe-netboot.tgz` | PXE/TFTP asset bundle |
+| `KOLLA_PATH` | `${THAKI_DATA}/init-pkg/kolla-ansible-offline-bundle.tgz` | Offline Kolla-Ansible bundle path |
 
 ### `lib.sh`
 
@@ -175,6 +177,26 @@ The install requires a readable USB volume labeled `THAKI_DATA`.
 - enumerates `/usr/local/lib/cp/stages/*.sh`
 - executes stages in lexical order
 - records completion under `/var/lib/cp`
+
+### `setup-kolla-ansible.sh`
+
+`/usr/local/lib/cp/setup-kolla-ansible.sh` prepares a usable offline `kolla-ansible` environment for `THAKI_ADMIN`.
+
+It does the following:
+
+- resolves the admin home from `THAKI_ADMIN`
+- validates that `KOLLA_PATH` points to a local `.tgz` bundle
+- extracts the bundle under `${ADMIN_HOME}/kolla-ansible/bundle`
+- creates a virtualenv under `${ADMIN_HOME}/kolla-ansible/.venv`
+- installs Python packages from `wheelhouse/` with `--no-index`
+- installs ansible collections from `galaxy-collections/*.tar.gz`
+- validates the result with `kolla-ansible -h`
+- creates `${ADMIN_HOME}/5-use-kolla-ansible.sh` as a convenience launcher
+
+Expected bundle structure:
+
+- `wheelhouse/`
+- `galaxy-collections/`
 
 ## Stage Breakdown
 
@@ -265,6 +287,19 @@ Configured PXE values:
 - UEFI x86_64 boot file: `bootx64.efi`
 - TFTP root: `/srv/tftp`
 - subnet mask option: `255.255.255.0`
+
+### `18-setup-kolla-ansible.sh`
+
+Purpose:
+
+- provision an offline Kolla-Ansible environment for the admin user
+
+Behavior:
+
+- requires `THAKI_ADMIN` and `KOLLA_PATH`
+- calls `/usr/local/lib/cp/setup-kolla-ansible.sh`
+- runs after Docker setup and before Harbor preparation
+- relies on the normal stage stamp mechanism for idempotency
 
 ### `20-prepare-harbor.sh`
 
@@ -357,6 +392,10 @@ These are the settings most likely to change in future edits:
   - interface
   - DHCP range
   - TFTP assets
+- Kolla-Ansible:
+  - bundle path
+  - install layout under the admin home
+  - offline bundle contents
 - Harbor:
   - hostname
   - IP
@@ -369,6 +408,7 @@ These are the settings most likely to change in future edits:
 ## Known Gaps
 
 - `THAKI_DST_DATA_LABEL` is defined but unused.
+- `KOLLA_PATH` must point to a bundle that already contains `wheelhouse/` and `galaxy-collections/`.
 - `HARBOR_PROJECT_SCRIPT` is defined but not used directly by the stage logic.
 - `1-craete-harbor-projects.sh` appears to have a filename typo.
 - Stage numbering intentionally leaves gaps for future insertions.
